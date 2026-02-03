@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QLabel,
     QHBoxLayout,
-    QStackedLayout, QSlider
+    QStackedLayout, QSlider, QMessageBox
 )
 from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
 from PySide6.QtGui import QPixmap, QPainter, QKeySequence, QShortcut
@@ -73,6 +73,16 @@ class HeicViewer(QMainWindow):
 
         self.view_rotation = 0  # degrees: 0, 90, 180, 270
 
+        self.crop_mode = False
+        self.crop_rect = None
+        self._crop_start = None
+        self._crop_item = None
+        has_active_crop = self._crop_item is not None
+
+        self._crop_overlay_items = []
+        self.undo_stack = []
+        self.redo_stack = []
+
         # ---- shortcuts ----
         QShortcut(QKeySequence(Qt.Key_Right), self, activated=self.next_image)
         QShortcut(QKeySequence(Qt.Key_Left), self, activated=self.prev_image)
@@ -117,6 +127,17 @@ class HeicViewer(QMainWindow):
         self.rotate_right_btn.setToolTip("Rotate 90° Right")
         self.rotate_right_btn.clicked.connect(lambda: self.rotate_view(90))
 
+        self.crop_btn = QPushButton("Crop")
+        self.crop_btn.clicked.connect(self.enter_crop_mode)
+
+        self.crop_done_btn = QPushButton("Done")
+        self.crop_done_btn.clicked.connect(self.commit_crop)
+        self.crop_done_btn.setVisible(False)
+
+        self.crop_cancel_btn = QPushButton("Cancel")
+        self.crop_cancel_btn.clicked.connect(self.cancel_crop)
+        self.crop_cancel_btn.setVisible(False)
+
         start_layout.addStretch()
         start_layout.addWidget(self.open_button_center, alignment=Qt.AlignmentFlag.AlignCenter)
         start_layout.addStretch()
@@ -159,6 +180,10 @@ class HeicViewer(QMainWindow):
 
         top_bar.addWidget(self.open_button_top)
 
+        top_bar.addWidget(self.crop_btn)
+        top_bar.addWidget(self.crop_done_btn)
+        top_bar.addWidget(self.crop_cancel_btn)
+
         viewer_layout.addLayout(top_bar)
 
         # -- image view --
@@ -193,6 +218,64 @@ class HeicViewer(QMainWindow):
         self.stack.addWidget(start_page)    # index 0
         self.stack.addWidget(viewer_page)   # index 1
         self.stack.setCurrentIndex(0)
+
+    def enter_crop_mode(self):
+        self.crop_mode = True
+
+        self.crop_btn.setEnabled(False)
+        self.crop_done_btn.setVisible(True)
+        self.crop_cancel_btn.setVisible(True)
+
+        self.rotate_left_btn.setEnabled(False)
+        self.rotate_right_btn.setEnabled(False)
+        self.convert_btn.setEnabled(False)
+        self.save_as_btn.setEnabled(False)
+
+    def confirm_discard_crop(self) -> bool:
+        if self._crop_item is None:
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "Discard Crop?",
+            "You have an unfinished crop.\n\nDiscard it?",
+            QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel
+        )
+
+        return reply == QMessageBox.Discard
+
+    def exit_crop_mode(self):
+        self.crop_mode = False
+
+        self.crop_btn.setEnabled(True)
+        self.crop_done_btn.setVisible(False)
+        self.crop_cancel_btn.setVisible(False)
+
+        self.rotate_left_btn.setEnabled(True)
+        self.rotate_right_btn.setEnabled(True)
+        self.convert_btn.setEnabled(True)
+
+    def cancel_crop(self):
+        if not self.confirm_discard_crop():
+            return
+        self.clear_crop_preview()
+        self.exit_crop_mode()
+
+    def commit_crop(self):
+        if self._crop_item is None:
+            self.exit_crop_mode()
+            return
+
+        # Save previous state for undo
+        self.undo_stack.append(self.crop_rect)
+        self.redo_stack.clear()
+
+        self.crop_rect = self._crop_item.rect()
+        self.view_dirty = True
+        self.save_as_btn.setEnabled(True)
+
+        self.exit_crop_mode()
 
     def convert_image(self):
         if self.files is None or self.current_idx is None:
@@ -399,6 +482,8 @@ class HeicViewer(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
+        if self.crop_mode:
+            return
         urls = event.mimeData().urls()
         print(urls)
         if not urls:
@@ -408,7 +493,6 @@ class HeicViewer(QMainWindow):
         self.handle_file(file_path)
 
     def handle_file(self, file_path, from_navigation=False):
-
         path = Path(file_path)
         print(f"{path=}, {from_navigation=}")
         parent = path.parent
@@ -470,13 +554,13 @@ class HeicViewer(QMainWindow):
     #             )
 
     def next_image(self):
-        if not self.files:
+        if not self.files or self.crop_mode:
             return
         self.current_idx = min(self.current_idx + 1, len(self.files) - 1)
         self.handle_file(str(self.files[self.current_idx]), from_navigation=True)
 
     def prev_image(self):
-        if not self.files:
+        if not self.files or self.crop_mode:
             return
         self.current_idx = max(self.current_idx - 1, 0)
         self.handle_file(str(self.files[self.current_idx]), from_navigation=True)
