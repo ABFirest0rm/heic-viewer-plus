@@ -3,7 +3,13 @@ from pathlib import Path
 from PIL import Image
 from PIL.ImageQt import ImageQt
 import pillow_heif
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import QTimer, Signal, QRectF
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QGraphicsRectItem
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QPen, QColor
+from PySide6.QtWidgets import QGraphicsRectItem
+
 pillow_heif.register_heif_opener()
 print("HEIF support registered")
 
@@ -18,17 +24,61 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QStackedLayout, QSlider, QMessageBox
 )
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
-from PySide6.QtGui import QPixmap, QPainter, QKeySequence, QShortcut
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
+from PySide6.QtGui import QPixmap, QPainter, QKeySequence, QShortcut, QPainterPath
 from PySide6.QtCore import Qt
+
+
+class ClippedPixmapItem(QGraphicsPixmapItem):
+    """A QGraphicsPixmapItem that can be clipped to a specific rect"""
+
+    def __init__(self, pixmap):
+        super().__init__(pixmap)
+        self._clip_rect = None
+
+    # selected crop
+    def setClipRect(self, rect):
+        self._clip_rect = rect
+        self.update()
+
+    # reset crop area
+    def clearClipRect(self):
+        """Remove clipping"""
+        self._clip_rect = None
+        self.update()
+
+    # canvas boundary
+    def boundingRect(self):
+        """Return the clipped bounding rect if clip is set"""
+        if self._clip_rect:
+            return self._clip_rect
+        return super().boundingRect()
+
+    # restrcit mouse intearaction region
+    def shape(self):
+        """Return the clipped shape"""
+        path = QPainterPath()
+        if self._clip_rect:
+            path.addRect(self._clip_rect)
+        else:
+            path.addRect(self.boundingRect())
+        return path
+
+    def paint(self, painter, option, widget=None):
+        """Paint with clipping if set"""
+        if self._clip_rect:
+            painter.setClipRect(self._clip_rect)
+        super().paint(painter, option, widget)
+
 
 class ImageView(QGraphicsView):
     zoomed = Signal(float)
     resetRequested = Signal()
 
-    def __init__(self, scene, parent=None):
+    def __init__(self, scene, controller, parent=None):
         super().__init__(scene, parent)
 
+        self.controller = controller
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -49,9 +99,53 @@ class ImageView(QGraphicsView):
         self.resetRequested.emit()
         event.accept()
 
+    def mousePressEvent(self, event):
+        ctrl = self.controller
+
+        if not ctrl.crop_mode:
+            return super().mousePressEvent(event)
+
+        if event.button() != Qt.LeftButton:
+            return
+
+        ctrl._crop_start = self.mapToScene(event.position().toPoint())
+
+        if ctrl._crop_item:
+            ctrl.scene.removeItem(ctrl._crop_item)
+
+        ctrl._crop_item = QGraphicsRectItem()
+        ctrl._crop_item.setPen(QPen(QColor(255, 255, 255), 1, Qt.DashLine))
+        ctrl._crop_item.setBrush(QColor(255, 255, 255, 40))
+        ctrl._crop_item.setZValue(20)
+
+        ctrl.scene.addItem(ctrl._crop_item)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        ctrl = self.controller
+
+        if not ctrl.crop_mode or ctrl._crop_start is None:
+            return super().mouseMoveEvent(event)
+
+        current = self.mapToScene(event.position().toPoint())
+        rect = QRectF(ctrl._crop_start, current).normalized()
+
+        ctrl._crop_item.setRect(rect)
+        ctrl.update_crop_overlay(rect)
+
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        ctrl = self.controller
+
+        if not ctrl.crop_mode:
+            return super().mouseReleaseEvent(event)
+
+        ctrl._crop_start = None
+        event.accept()
+
 
 class HeicViewer(QMainWindow):
-
     IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".avif"}
 
     def __init__(self):
@@ -64,37 +158,37 @@ class HeicViewer(QMainWindow):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocus()
 
-        # ---- state ----
         self.files = None
         self.current_idx = None
-        self.current_zoom = 1.0   # 1.0 = 100%
+        self.current_zoom = 1.0
         self.user_zoomed = False
         self.view_dirty = False
-
-        self.view_rotation = 0  # degrees: 0, 90, 180, 270
+        self.view_rotation = 0
 
         self.crop_mode = False
         self.crop_rect = None
         self._crop_start = None
         self._crop_item = None
-        has_active_crop = self._crop_item is not None
 
         self._crop_overlay_items = []
         self.undo_stack = []
         self.redo_stack = []
 
-        # ---- shortcuts ----
         QShortcut(QKeySequence(Qt.Key_Right), self, activated=self.next_image)
         QShortcut(QKeySequence(Qt.Key_Left), self, activated=self.prev_image)
+        QShortcut(QKeySequence(Qt.Key_F11), self, activated=self.toggle_fullscreen)
+        # QShortcut(QKeySequence(Qt.Key_Escape), self, activated=self.showNormal)
+        QShortcut(QKeySequence.Undo, self, activated=self.undo)
+        QShortcut(QKeySequence.Redo, self, activated=self.redo)
+        # QShortcut(QKeySequence(Qt.Key_Enter), self, activated=self._on_crop_enter)
 
-        # ---- central layout ----
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
 
         # ---- graphics view ----
         self.scene = QGraphicsScene(self)
-        self.view = ImageView(self.scene, self)
+        self.view = ImageView(self.scene, self, self)
         self.view.setStyleSheet("background: transparent; border: none;")
 
         self.view.setRenderHints(
@@ -138,6 +232,16 @@ class HeicViewer(QMainWindow):
         self.crop_cancel_btn.clicked.connect(self.cancel_crop)
         self.crop_cancel_btn.setVisible(False)
 
+        self.crop_done_shortcut_return = QShortcut(QKeySequence(Qt.Key_Return), self)
+        self.crop_done_shortcut_enter  = QShortcut(QKeySequence(Qt.Key_Enter), self)
+        self.crop_done_shortcut_return.activated.connect(self._on_crop_enter)
+        self.crop_done_shortcut_enter .activated.connect(self._on_crop_enter)
+
+
+        self.fullscreen_btn = QPushButton("⛶")
+        self.fullscreen_btn.setToolTip("Toggle Fullscreen (F11)")
+        self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
+
         start_layout.addStretch()
         start_layout.addWidget(self.open_button_center, alignment=Qt.AlignmentFlag.AlignCenter)
         start_layout.addStretch()
@@ -154,12 +258,25 @@ class HeicViewer(QMainWindow):
         self.open_button_top.clicked.connect(self.open_file)
 
         # --- action buttons ---
-        self.convert_btn = QPushButton("Convert")
+        self.convert_btn = QPushButton("Convert Original")
+        self.convert_btn.setToolTip("Convert original image without edits")
         self.convert_btn.clicked.connect(self.convert_image)
 
         self.save_as_btn = QPushButton("Save As")
         self.save_as_btn.setEnabled(False)  # enabled only after rotate/crop
         self.save_as_btn.clicked.connect(self.save_as_view)
+
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.clicked.connect(self.undo)
+
+        self.redo_btn = QPushButton("Redo")
+        self.redo_btn.setEnabled(False)
+        self.redo_btn.clicked.connect(self.redo)
+
+        self.actual_size_btn = QPushButton("1:1")
+        self.actual_size_btn.setToolTip("Actual Size (100%)  — Ctrl+1")
+        self.actual_size_btn.clicked.connect(self.zoom_actual_size)
 
         # layout: center rotate, right actions
         top_bar.addStretch()
@@ -168,6 +285,10 @@ class HeicViewer(QMainWindow):
         top_bar.addStretch()
         top_bar.addWidget(self.convert_btn)
         top_bar.addWidget(self.save_as_btn)
+
+        top_bar.addWidget(self.rotate_left_btn)
+        top_bar.addWidget(self.rotate_right_btn)
+        top_bar.addWidget(self.fullscreen_btn)
 
         viewer_layout.addLayout(top_bar)
 
@@ -184,6 +305,9 @@ class HeicViewer(QMainWindow):
         top_bar.addWidget(self.crop_done_btn)
         top_bar.addWidget(self.crop_cancel_btn)
 
+        top_bar.addWidget(self.undo_btn)
+        top_bar.addWidget(self.redo_btn)
+
         viewer_layout.addLayout(top_bar)
 
         # -- image view --
@@ -195,7 +319,7 @@ class HeicViewer(QMainWindow):
         zoom_bar.setSpacing(8)
 
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self.zoom_slider.setRange(10, 400)      # 10% → 400%
+        self.zoom_slider.setRange(10, 400)  # 10% → 400%
         self.zoom_slider.setValue(100)
         self.zoom_slider.setSingleStep(5)
         self.zoom_slider.setFixedWidth(220)
@@ -210,17 +334,22 @@ class HeicViewer(QMainWindow):
         zoom_bar.addStretch()
         zoom_bar.addWidget(self.zoom_slider)
         zoom_bar.addWidget(self.zoom_label)
+        zoom_bar.addWidget(self.actual_size_btn)
         zoom_bar.addStretch()
 
         viewer_layout.addLayout(zoom_bar)
 
         # ---- stack pages ----
-        self.stack.addWidget(start_page)    # index 0
-        self.stack.addWidget(viewer_page)   # index 1
+        self.stack.addWidget(start_page)  # index 0
+        self.stack.addWidget(viewer_page)  # index 1
         self.stack.setCurrentIndex(0)
 
+    # Crop Button
     def enter_crop_mode(self):
         self.crop_mode = True
+
+        # self.view.setCursor(Qt.CursorShape.CrossCursor)
+        self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
 
         self.crop_btn.setEnabled(False)
         self.crop_done_btn.setVisible(True)
@@ -248,6 +377,9 @@ class HeicViewer(QMainWindow):
     def exit_crop_mode(self):
         self.crop_mode = False
 
+        # self.view.unsetCursor()
+        self.view.viewport().unsetCursor()
+
         self.crop_btn.setEnabled(True)
         self.crop_done_btn.setVisible(False)
         self.crop_cancel_btn.setVisible(False)
@@ -256,6 +388,7 @@ class HeicViewer(QMainWindow):
         self.rotate_right_btn.setEnabled(True)
         self.convert_btn.setEnabled(True)
 
+    # Cancel Button
     def cancel_crop(self):
         if not self.confirm_discard_crop():
             return
@@ -267,15 +400,207 @@ class HeicViewer(QMainWindow):
             self.exit_crop_mode()
             return
 
-        # Save previous state for undo
-        self.undo_stack.append(self.crop_rect)
+        # Save undo state
+        self.undo_stack.append(self._capture_view_state())
         self.redo_stack.clear()
+        self._update_undo_redo_buttons()
 
-        self.crop_rect = self._crop_item.rect()
+        # Convert crop rect to SCENE coordinates
+        selection_scene_rect = self._crop_item.mapRectToScene(
+            self._crop_item.rect()
+        )
+
+        # Clamp crop to image bounds (both in scene space)
+        image_scene_rect = self.pixmap_item.sceneBoundingRect()
+        final_crop = selection_scene_rect.intersected(image_scene_rect)
+
+        if final_crop.isEmpty():
+            final_crop = selection_scene_rect
+
+        self.crop_rect = final_crop
+
+        # Remove crop visuals
+        self.clear_crop_preview()
+
+        # Non-destructive crop: clip the pixmap item to the crop rect
+        self.pixmap_item.setClipRect(final_crop)
+
+        # Update scene rect to the crop area
+        self.scene.setSceneRect(final_crop)
+
+        # Fit new scene
+        self.view.fitInView(final_crop, Qt.AspectRatioMode.KeepAspectRatio)
+
+        # Sync zoom UI
+        t = self.view.transform()
+        self.current_zoom = t.m11()
+        self.update_zoom_label()
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(int(self.current_zoom * 100))
+        self.zoom_slider.blockSignals(False)
+
         self.view_dirty = True
         self.save_as_btn.setEnabled(True)
 
         self.exit_crop_mode()
+
+    def focus_on_crop(self, rect: QRectF):
+        if not rect or not rect.isValid():
+            return
+
+        # we are explicitly controlling the view now
+        self.user_zoomed = True
+
+        # fit view to crop rect
+        self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+
+        # extract resulting zoom from view transform
+        t = self.view.transform()
+        self.current_zoom = t.m11()  # scale factor
+
+        # sync UI
+        self.update_zoom_label()
+
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(int(self.current_zoom * 100))
+        self.zoom_slider.blockSignals(False)
+
+    def update_crop_overlay(self, crop_rect: QRectF):
+        self.clear_crop_overlay()
+
+        if not self.pixmap_item:
+            return
+
+        img_rect = self.pixmap_item.boundingRect()
+
+        dim_color = QColor(0, 0, 0, 140)
+
+        # Top
+        top = QRectF(
+            img_rect.left(),
+            img_rect.top(),
+            img_rect.width(),
+            crop_rect.top() - img_rect.top()
+        )
+
+        # Bottom
+        bottom = QRectF(
+            img_rect.left(),
+            crop_rect.bottom(),
+            img_rect.width(),
+            img_rect.bottom() - crop_rect.bottom()
+        )
+
+        # Left
+        left = QRectF(
+            img_rect.left(),
+            crop_rect.top(),
+            crop_rect.left() - img_rect.left(),
+            crop_rect.height()
+        )
+
+        # Right
+        right = QRectF(
+            crop_rect.right(),
+            crop_rect.top(),
+            img_rect.right() - crop_rect.right(),
+            crop_rect.height()
+        )
+
+        for rect in (top, bottom, left, right):
+            if rect.isValid() and not rect.isEmpty():
+                item = QGraphicsRectItem(rect)
+                item.setBrush(dim_color)
+                item.setPen(Qt.NoPen)
+                item.setZValue(10)
+                self.scene.addItem(item)
+                self._crop_overlay_items.append(item)
+
+    def _on_crop_enter(self):
+        if self.crop_mode:
+            self.commit_crop()
+
+    def clear_crop_overlay(self):
+        for item in self._crop_overlay_items:
+            self.scene.removeItem(item)
+        self._crop_overlay_items.clear()
+
+    def clear_crop_preview(self):
+        if self._crop_item:
+            self.scene.removeItem(self._crop_item)
+            self._crop_item = None
+        self.clear_crop_overlay()
+
+    def _capture_view_state(self):
+        return {
+            "zoom": self.current_zoom,
+            "rotation": self.view_rotation,
+            "transform": self.view.transform(),
+            "scene_rect": self.scene.sceneRect(),
+        }
+
+    def _restore_view_state(self, state):
+        if not state:
+            return
+
+        # restore transform & scene
+        self.view.setTransform(state["transform"])
+        self.scene.setSceneRect(state["scene_rect"])
+
+        # restore zoom & rotation bookkeeping
+        self.current_zoom = state["zoom"]
+        self.view_rotation = state["rotation"]
+
+        # IMPORTANT: restore crop clip
+        if self.crop_rect:
+            self.pixmap_item.clearClipRect()
+
+        # reapply clip if scene rect != full image
+        if state["scene_rect"] != self.pixmap_item.sceneBoundingRect():
+            self.pixmap_item.setClipRect(state["scene_rect"])
+            self.crop_rect = state["scene_rect"]
+        else:
+            self.crop_rect = None
+
+        # sync UI
+        self.update_zoom_label()
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(int(self.current_zoom * 100))
+        self.zoom_slider.blockSignals(False)
+
+        self.user_zoomed = True
+        self.view_dirty = True
+        self.save_as_btn.setEnabled(True)
+
+    def undo(self):
+        if not self.undo_stack:
+            return
+
+        # save current state for redo
+        self.redo_stack.append(self._capture_view_state())
+
+        # restore last undo state
+        state = self.undo_stack.pop()
+        self._restore_view_state(state)
+
+        self._update_undo_redo_buttons()
+
+    def redo(self):
+        if not self.redo_stack:
+            return
+
+        # save current state for undo
+        self.undo_stack.append(self._capture_view_state())
+
+        # restore last redo state
+        state = self.redo_stack.pop()
+        self._restore_view_state(state)
+
+        self._update_undo_redo_buttons()
+
+    def _update_undo_redo_buttons(self):
+        self.undo_btn.setEnabled(bool(self.undo_stack))
+        self.redo_btn.setEnabled(bool(self.redo_stack))
 
     def convert_image(self):
         if self.files is None or self.current_idx is None:
@@ -371,6 +696,15 @@ class HeicViewer(QMainWindow):
             out_path = out_path.with_suffix(".avif")
 
         img = Image.open(self.files[self.current_idx])
+
+        if self.crop_rect:
+            # Convert float coords to int for PIL
+            left = int(self.crop_rect.left())
+            top = int(self.crop_rect.top())
+            right = int(self.crop_rect.right())
+            bottom = int(self.crop_rect.bottom())
+            img = img.crop((left, top, right, bottom))
+
         img = self.apply_view_rotation(img)
         # crop will be applied here later
 
@@ -450,15 +784,18 @@ class HeicViewer(QMainWindow):
 
     def _fit_image(self):
         if hasattr(self, "pixmap_item") and not self.user_zoomed:
+            # self.view.fitInView(
+            #     self.pixmap_item,
+            #     Qt.AspectRatioMode.KeepAspectRatio
+            # )
             self.view.fitInView(
-                self.pixmap_item,
+                self.scene.sceneRect(),
                 Qt.AspectRatioMode.KeepAspectRatio
             )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_image()
-
 
     def open_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -527,7 +864,8 @@ class HeicViewer(QMainWindow):
         # self.view.resetTransform()
 
         self.scene.clear()
-        self.pixmap_item = self.scene.addPixmap(pixmap)
+        self.pixmap_item = ClippedPixmapItem(pixmap)
+        self.scene.addItem(self.pixmap_item)
         self.scene.setSceneRect(self.pixmap_item.boundingRect())
 
         # self.view.resetTransform()
@@ -540,10 +878,15 @@ class HeicViewer(QMainWindow):
         self.view_rotation = 0
         self.current_zoom = 1.0
         self.view_dirty = False
+        self.crop_rect = None
 
         self.save_as_btn.setEnabled(False)
 
         self.view.resetTransform()
+
+        # Clear any existing clip from previous crop
+        if hasattr(self, 'pixmap_item') and self.pixmap_item:
+            self.pixmap_item.clearClipRect()
 
     # def _fit_image(self):
     #     if hasattr(self, "pixmap_item"):
@@ -565,9 +908,37 @@ class HeicViewer(QMainWindow):
         self.current_idx = max(self.current_idx - 1, 0)
         self.handle_file(str(self.files[self.current_idx]), from_navigation=True)
 
-    # def resizeEvent(self, event):
-    #     super().resizeEvent(event)
-    #     self._fit_image()
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def zoom_actual_size(self):
+        if not hasattr(self, "pixmap_item"):
+            return
+        self.user_zoomed = True
+        self.current_zoom = 1.0
+
+        self.view.resetTransform()
+        self.view.rotate(self.view_rotation)
+        self.view.scale(1.0, 1.0)
+
+        self.update_zoom_label()
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.blockSignals(False)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            if self.crop_mode:
+                self.cancel_crop()
+                return
+            if self.isFullScreen():
+                self.showNormal()
+                return
+
+        super().keyPressEvent(event)
 
 
 if __name__ == "__main__":
