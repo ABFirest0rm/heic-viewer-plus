@@ -9,6 +9,8 @@ from PySide6.QtWidgets import QGraphicsRectItem
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QPen, QColor
 from PySide6.QtWidgets import QGraphicsRectItem
+from PySide6.QtWidgets import QSizePolicy
+
 
 pillow_heif.register_heif_opener()
 print("HEIF support registered")
@@ -151,120 +153,115 @@ class HeicViewer(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        # --------------------------------------------------
+        # Window setup
+        # --------------------------------------------------
         self.setWindowTitle("HEIC Viewer")
-        self.resize(800, 600)
-
+        self.resize(900, 600)
         self.setAcceptDrops(True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setFocus()
+        self.setFocusPolicy(Qt.StrongFocus)
 
+        # --------------------------------------------------
+        # State
+        # --------------------------------------------------
         self.files = None
         self.current_idx = None
+
         self.current_zoom = 1.0
         self.user_zoomed = False
         self.view_dirty = False
         self.view_rotation = 0
+        self.is_zoom_actual_size = False
 
         self.crop_mode = False
         self.crop_rect = None
         self._crop_start = None
         self._crop_item = None
-
         self._crop_overlay_items = []
+
         self.undo_stack = []
         self.redo_stack = []
 
+        # --------------------------------------------------
+        # Shortcuts
+        # --------------------------------------------------
         QShortcut(QKeySequence(Qt.Key_Right), self, activated=self.next_image)
         QShortcut(QKeySequence(Qt.Key_Left), self, activated=self.prev_image)
         QShortcut(QKeySequence(Qt.Key_F11), self, activated=self.toggle_fullscreen)
-        # QShortcut(QKeySequence(Qt.Key_Escape), self, activated=self.showNormal)
         QShortcut(QKeySequence.Undo, self, activated=self.undo)
         QShortcut(QKeySequence.Redo, self, activated=self.redo)
-        # QShortcut(QKeySequence(Qt.Key_Enter), self, activated=self._on_crop_enter)
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self.zoom_actual_size)
 
-        central = QWidget()
+        self.crop_done_shortcut_return = QShortcut(QKeySequence(Qt.Key_Return), self)
+        self.crop_done_shortcut_enter = QShortcut(QKeySequence(Qt.Key_Enter), self)
+        self.crop_done_shortcut_return.activated.connect(self._on_crop_enter)
+        self.crop_done_shortcut_enter.activated.connect(self._on_crop_enter)
+
+        # --------------------------------------------------
+        # Central widget
+        # --------------------------------------------------
+        central = QWidget(self)
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # ---- graphics view ----
+        # --------------------------------------------------
+        # Graphics view
+        # --------------------------------------------------
         self.scene = QGraphicsScene(self)
         self.view = ImageView(self.scene, self, self)
         self.view.setStyleSheet("background: transparent; border: none;")
-
         self.view.setRenderHints(
-            self.view.renderHints()
-            | QPainter.RenderHint.Antialiasing
-            | QPainter.RenderHint.SmoothPixmapTransform
+            QPainter.Antialiasing | QPainter.SmoothPixmapTransform
         )
-
-        # signals from ImageView
         self.view.zoomed.connect(self.on_wheel_zoom)
         self.view.resetRequested.connect(self.reset_zoom)
 
-        # ---- stacked pages ----
-        self.stack = QStackedLayout()
-        main_layout.addLayout(self.stack)
+        # --------------------------------------------------
+        # Zoom widgets (CREATE ONCE)
+        # --------------------------------------------------
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(10, 400)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedWidth(220)
+        self.zoom_slider.valueChanged.connect(self.on_slider_zoom)
 
-        # ===== Start page =====
-        start_page = QWidget()
-        start_layout = QVBoxLayout(start_page)
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setFixedWidth(50)
 
-        self.open_button_center = QPushButton("Open Image")
-        self.open_button_center.setFixedWidth(160)
-        self.open_button_center.clicked.connect(self.open_file)
+        self.actual_size_btn = QPushButton("1:1")
+        self.actual_size_btn.setToolTip("Actual Size (Ctrl+1)")
+        self.actual_size_btn.clicked.connect(self.zoom_actual_size)
+
+        # --------------------------------------------------
+        # Buttons
+        # --------------------------------------------------
+        self.open_button_top = QPushButton("Open")
+        self.open_button_top.clicked.connect(self.open_file)
+
+        self.convert_btn = QPushButton("Convert Original")
+        self.convert_btn.clicked.connect(self.convert_image)
+
+        self.save_as_btn = QPushButton("Save As")
+        self.save_as_btn.setEnabled(False)
+        self.save_as_btn.clicked.connect(self.save_as_view)
 
         self.rotate_left_btn = QPushButton("⟲")
-        self.rotate_left_btn.setToolTip("Rotate 90° Left")
         self.rotate_left_btn.clicked.connect(lambda: self.rotate_view(-90))
 
         self.rotate_right_btn = QPushButton("⟳")
-        self.rotate_right_btn.setToolTip("Rotate 90° Right")
         self.rotate_right_btn.clicked.connect(lambda: self.rotate_view(90))
 
         self.crop_btn = QPushButton("Crop")
         self.crop_btn.clicked.connect(self.enter_crop_mode)
 
         self.crop_done_btn = QPushButton("Done")
-        self.crop_done_btn.clicked.connect(self.commit_crop)
         self.crop_done_btn.setVisible(False)
+        self.crop_done_btn.clicked.connect(self.commit_crop)
 
         self.crop_cancel_btn = QPushButton("Cancel")
-        self.crop_cancel_btn.clicked.connect(self.cancel_crop)
         self.crop_cancel_btn.setVisible(False)
-
-        self.crop_done_shortcut_return = QShortcut(QKeySequence(Qt.Key_Return), self)
-        self.crop_done_shortcut_enter  = QShortcut(QKeySequence(Qt.Key_Enter), self)
-        self.crop_done_shortcut_return.activated.connect(self._on_crop_enter)
-        self.crop_done_shortcut_enter .activated.connect(self._on_crop_enter)
-
-
-        self.fullscreen_btn = QPushButton("⛶")
-        self.fullscreen_btn.setToolTip("Toggle Fullscreen (F11)")
-        self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
-
-        start_layout.addStretch()
-        start_layout.addWidget(self.open_button_center, alignment=Qt.AlignmentFlag.AlignCenter)
-        start_layout.addStretch()
-
-        # ===== Viewer page =====
-        viewer_page = QWidget()
-        viewer_layout = QVBoxLayout(viewer_page)
-
-        # -- top bar --
-        top_bar = QHBoxLayout()
-
-        self.open_button_top = QPushButton("Open Image")
-        self.open_button_top.setFixedWidth(120)
-        self.open_button_top.clicked.connect(self.open_file)
-
-        # --- action buttons ---
-        self.convert_btn = QPushButton("Convert Original")
-        self.convert_btn.setToolTip("Convert original image without edits")
-        self.convert_btn.clicked.connect(self.convert_image)
-
-        self.save_as_btn = QPushButton("Save As")
-        self.save_as_btn.setEnabled(False)  # enabled only after rotate/crop
-        self.save_as_btn.clicked.connect(self.save_as_view)
+        self.crop_cancel_btn.clicked.connect(self.cancel_crop)
 
         self.undo_btn = QPushButton("Undo")
         self.undo_btn.setEnabled(False)
@@ -274,74 +271,84 @@ class HeicViewer(QMainWindow):
         self.redo_btn.setEnabled(False)
         self.redo_btn.clicked.connect(self.redo)
 
-        self.actual_size_btn = QPushButton("1:1")
-        self.actual_size_btn.setToolTip("Actual Size (100%)  — Ctrl+1")
-        self.actual_size_btn.clicked.connect(self.zoom_actual_size)
+        self.fullscreen_btn = QPushButton("⛶")
+        self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
 
-        # layout: center rotate, right actions
+        # --- Exit fullscreen button (CREATE ONCE) ---
+        self.exit_fullscreen_btn = QPushButton("✕")
+        self.exit_fullscreen_btn.setToolTip("Exit Fullscreen (Esc)")
+        self.exit_fullscreen_btn.clicked.connect(self.toggle_fullscreen)
+
+        # --- Exit fullscreen widget (CREATE ONCE) ---
+        self.exit_fs_widget = QWidget(self)
+        exit_fs_layout = QHBoxLayout(self.exit_fs_widget)
+        exit_fs_layout.setContentsMargins(6, 6, 6, 6)
+
+        exit_fs_layout.addStretch()
+        exit_fs_layout.addWidget(self.exit_fullscreen_btn)
+
+        self.exit_fs_widget.setVisible(False)
+
+        # --------------------------------------------------
+        # Stacked pages
+        # --------------------------------------------------
+        self.stack = QStackedLayout()
+        main_layout.addLayout(self.stack)
+
+        # ---------------- Start page ----------------
+        start_page = QWidget()
+        start_layout = QVBoxLayout(start_page)
+
+        open_center = QPushButton("Open Image")
+        open_center.setFixedWidth(180)
+        open_center.clicked.connect(self.open_file)
+
+        start_layout.addStretch()
+        start_layout.addWidget(open_center, alignment=Qt.AlignCenter)
+        start_layout.addStretch()
+
+        # ---------------- Viewer page ----------------
+        viewer_page = QWidget()
+        viewer_layout = QVBoxLayout(viewer_page)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.setSpacing(0)
+
+        # -------- Top bar --------
+        self.top_bar_widget = QWidget()
+        top_bar = QHBoxLayout(self.top_bar_widget)
+        top_bar.setContentsMargins(6, 6, 6, 6)
+
+        top_bar.addWidget(self.convert_btn)
+        top_bar.addWidget(self.crop_btn)
         top_bar.addStretch()
         top_bar.addWidget(self.rotate_left_btn)
         top_bar.addWidget(self.rotate_right_btn)
         top_bar.addStretch()
-        top_bar.addWidget(self.convert_btn)
+        top_bar.addWidget(self.open_button_top)
         top_bar.addWidget(self.save_as_btn)
 
-        top_bar.addWidget(self.rotate_left_btn)
-        top_bar.addWidget(self.rotate_right_btn)
-        top_bar.addWidget(self.fullscreen_btn)
+        # -------- Bottom bar --------
+        self.bottom_bar_widget = QWidget()
+        bottom_bar = QHBoxLayout(self.bottom_bar_widget)
+        bottom_bar.setContentsMargins(6, 6, 6, 6)
 
-        viewer_layout.addLayout(top_bar)
+        bottom_bar.addWidget(self.undo_btn)
+        bottom_bar.addWidget(self.redo_btn)
+        bottom_bar.addStretch()
+        bottom_bar.addWidget(self.zoom_slider)
+        bottom_bar.addWidget(self.zoom_label)
+        bottom_bar.addWidget(self.actual_size_btn)
+        bottom_bar.addWidget(self.fullscreen_btn)
 
-        top_bar.addStretch()  # pushes center group to center
+        # -------- Assemble viewer --------
+        viewer_layout.addWidget(self.top_bar_widget)
+        viewer_layout.addWidget(self.view, stretch=1)
+        viewer_layout.addWidget(self.exit_fs_widget)
+        viewer_layout.addWidget(self.bottom_bar_widget)
 
-        top_bar.addWidget(self.rotate_left_btn)
-        top_bar.addWidget(self.rotate_right_btn)
-
-        top_bar.addStretch()  # pushes Open button to the right
-
-        top_bar.addWidget(self.open_button_top)
-
-        top_bar.addWidget(self.crop_btn)
-        top_bar.addWidget(self.crop_done_btn)
-        top_bar.addWidget(self.crop_cancel_btn)
-
-        top_bar.addWidget(self.undo_btn)
-        top_bar.addWidget(self.redo_btn)
-
-        viewer_layout.addLayout(top_bar)
-
-        # -- image view --
-        viewer_layout.addWidget(self.view)
-
-        # -- bottom zoom bar --
-        zoom_bar = QHBoxLayout()
-        zoom_bar.setContentsMargins(10, 6, 10, 10)
-        zoom_bar.setSpacing(8)
-
-        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self.zoom_slider.setRange(10, 400)  # 10% → 400%
-        self.zoom_slider.setValue(100)
-        self.zoom_slider.setSingleStep(5)
-        self.zoom_slider.setFixedWidth(220)
-        self.zoom_slider.valueChanged.connect(self.on_slider_zoom)
-
-        self.zoom_label = QLabel("100%")
-        self.zoom_label.setFixedWidth(50)
-        self.zoom_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-
-        zoom_bar.addStretch()
-        zoom_bar.addWidget(self.zoom_slider)
-        zoom_bar.addWidget(self.zoom_label)
-        zoom_bar.addWidget(self.actual_size_btn)
-        zoom_bar.addStretch()
-
-        viewer_layout.addLayout(zoom_bar)
-
-        # ---- stack pages ----
-        self.stack.addWidget(start_page)  # index 0
-        self.stack.addWidget(viewer_page)  # index 1
+        # -------- Stack --------
+        self.stack.addWidget(start_page)
+        self.stack.addWidget(viewer_page)
         self.stack.setCurrentIndex(0)
 
     # Crop Button
@@ -778,20 +785,25 @@ class HeicViewer(QMainWindow):
 
         QTimer.singleShot(0, self._fit_image)
 
+
     # ------------------------------------------------------------------
     # Image handling
     # ------------------------------------------------------------------
 
     def _fit_image(self):
         if hasattr(self, "pixmap_item") and not self.user_zoomed:
-            # self.view.fitInView(
-            #     self.pixmap_item,
-            #     Qt.AspectRatioMode.KeepAspectRatio
-            # )
             self.view.fitInView(
                 self.scene.sceneRect(),
                 Qt.AspectRatioMode.KeepAspectRatio
             )
+        t = self.view.transform()
+        self.current_zoom = t.m11()
+
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(int(self.current_zoom * 100))
+        self.zoom_slider.blockSignals(False)
+
+        self.update_zoom_label()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -911,23 +923,37 @@ class HeicViewer(QMainWindow):
     def toggle_fullscreen(self):
         if self.isFullScreen():
             self.showNormal()
+            self.top_bar_widget.setVisible(True)
+            self.bottom_bar_widget.setVisible(True)
+            self.exit_fs_widget.setVisible(False)
         else:
             self.showFullScreen()
+            self.top_bar_widget.setVisible(False)
+            self.bottom_bar_widget.setVisible(False)
+            self.exit_fs_widget.setVisible(True)
 
     def zoom_actual_size(self):
         if not hasattr(self, "pixmap_item"):
             return
+
+        if self.is_zoom_actual_size:
+            self.reset_zoom()
+            self.is_zoom_actual_size = False
+            return
+
+        self.is_zoom_actual_size = True
         self.user_zoomed = True
         self.current_zoom = 1.0
 
         self.view.resetTransform()
         self.view.rotate(self.view_rotation)
         self.view.scale(1.0, 1.0)
+        self.view.centerOn(self.pixmap_item)
 
-        self.update_zoom_label()
         self.zoom_slider.blockSignals(True)
         self.zoom_slider.setValue(100)
         self.zoom_slider.blockSignals(False)
+        self.update_zoom_label()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -935,10 +961,19 @@ class HeicViewer(QMainWindow):
                 self.cancel_crop()
                 return
             if self.isFullScreen():
-                self.showNormal()
+                self.toggle_fullscreen()
+                return
+            if self.is_zoom_actual_size:
+                self.reset_zoom()
+                self.is_zoom_actual_size = False
                 return
 
+
         super().keyPressEvent(event)
+
+    def set_ui_visible(self, visible: bool):
+        self.top_bar_widget.setVisible(visible)
+        self.bottom_bar_widget.setVisible(visible)
 
 
 if __name__ == "__main__":
