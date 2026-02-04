@@ -10,6 +10,8 @@ from PySide6.QtCore import QRectF
 from PySide6.QtGui import QPen, QColor
 from PySide6.QtWidgets import QGraphicsRectItem
 from PySide6.QtWidgets import QSizePolicy
+import math
+
 
 
 pillow_heif.register_heif_opener()
@@ -230,8 +232,12 @@ class HeicViewer(QMainWindow):
         self.zoom_label.setFixedWidth(50)
 
         self.actual_size_btn = QPushButton("1:1")
-        self.actual_size_btn.setToolTip("Actual Size (Ctrl+1)")
+        self.actual_size_btn.setToolTip("Actual Size (Ctrl+F)")
         self.actual_size_btn.clicked.connect(self.zoom_actual_size)
+
+        # --- Zoom UI polish ---
+        self.zoom_slider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.zoom_label.setAlignment(Qt.AlignCenter)
 
         # --------------------------------------------------
         # Buttons
@@ -320,7 +326,7 @@ class HeicViewer(QMainWindow):
 
         top_bar.addWidget(self.convert_btn)
         top_bar.addWidget(self.crop_btn)
-        top_bar.addStretch()
+        # top_bar.addStretch()
         top_bar.addWidget(self.rotate_left_btn)
         top_bar.addWidget(self.rotate_right_btn)
         top_bar.addStretch()
@@ -439,12 +445,7 @@ class HeicViewer(QMainWindow):
         self.view.fitInView(final_crop, Qt.AspectRatioMode.KeepAspectRatio)
 
         # Sync zoom UI
-        t = self.view.transform()
-        self.current_zoom = t.m11()
-        self.update_zoom_label()
-        self.zoom_slider.blockSignals(True)
-        self.zoom_slider.setValue(int(self.current_zoom * 100))
-        self.zoom_slider.blockSignals(False)
+        self._sync_zoom_ui_from_view()
 
         self.view_dirty = True
         self.save_as_btn.setEnabled(True)
@@ -462,15 +463,8 @@ class HeicViewer(QMainWindow):
         self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
 
         # extract resulting zoom from view transform
-        t = self.view.transform()
-        self.current_zoom = t.m11()  # scale factor
+        self._sync_zoom_ui_from_view()
 
-        # sync UI
-        self.update_zoom_label()
-
-        self.zoom_slider.blockSignals(True)
-        self.zoom_slider.setValue(int(self.current_zoom * 100))
-        self.zoom_slider.blockSignals(False)
 
     def update_crop_overlay(self, crop_rect: QRectF):
         self.clear_crop_overlay()
@@ -731,29 +725,51 @@ class HeicViewer(QMainWindow):
         )
 
     def rotate_view(self, delta):
+        if not hasattr(self, "pixmap_item"):
+            return
+
         self.view_rotation = (self.view_rotation + delta) % 360
 
+        # Save the current viewport center in SCENE coordinates
+        center_scene = self.view.mapToScene(self.view.viewport().rect().center())
+
+        # Decide whether to keep current zoom or refit
+        keep_zoom = self.user_zoomed or self.is_zoom_actual_size
+
+        # Reset transform and apply rotation
         self.view.resetTransform()
         self.view.rotate(self.view_rotation)
-        self.view.scale(self.current_zoom, self.current_zoom)
+
+        if keep_zoom:
+            # Re-apply the same zoom level and re-center on the same scene point
+            self.view.scale(self.current_zoom, self.current_zoom)
+            self.view.centerOn(center_scene)
+            self._sync_zoom_ui_from_view()
+        else:
+            # If user never zoomed manually, keep "fit-to-view" behavior
+            QTimer.singleShot(0, self._fit_image)
 
         self.view_dirty = True
         self.save_as_btn.setEnabled(True)
-        QTimer.singleShot(0, self._fit_image)
 
     # ------------------------------------------------------------------
     # Zoom logic
     # ------------------------------------------------------------------
 
-    def set_zoom(self, zoom: float):
-        zoom = max(0.1, min(zoom, 4.0))
-
-        factor = zoom / self.current_zoom
-        self.current_zoom = zoom
-        self.user_zoomed = True
-
-        self.view.scale(factor, factor)
-        self.update_zoom_label()
+    # def set_zoom(self, zoom: float):
+    #     zoom = max(0.1, min(zoom, 4.0))
+    #
+    #     # avoid div-by-zero if something goes wrong
+    #     cur = max(self.current_zoom, 1e-6)
+    #     factor = zoom / cur
+    #
+    #     self.view.scale(factor, factor)
+    #
+    #     self.current_zoom = zoom
+    #     self.user_zoomed = True
+    #     self.is_zoom_actual_size = False
+    #
+    #     self.update_zoom_label()
 
     def on_wheel_zoom(self, factor: float):
         new_zoom = self.current_zoom * factor
@@ -774,6 +790,7 @@ class HeicViewer(QMainWindow):
     def reset_zoom(self):
         self.user_zoomed = False
         self.current_zoom = 1.0
+        self.is_zoom_actual_size = False
 
         self.view.resetTransform()
         self.view.rotate(self.view_rotation)  # keep rotation
@@ -796,12 +813,33 @@ class HeicViewer(QMainWindow):
                 self.scene.sceneRect(),
                 Qt.AspectRatioMode.KeepAspectRatio
             )
-        t = self.view.transform()
-        self.current_zoom = t.m11()
+
+        self._sync_zoom_ui_from_view()
+
+    def _transform_scale(self, t):
+        # rotation-safe uniform scale from QTransform
+        return math.hypot(t.m11(), t.m12())
+
+    def _sync_zoom_ui_from_view(self):
+        self.current_zoom = self._transform_scale(self.view.transform())
 
         self.zoom_slider.blockSignals(True)
-        self.zoom_slider.setValue(int(self.current_zoom * 100))
+        self.zoom_slider.setValue(int(round(self.current_zoom * 100)))
         self.zoom_slider.blockSignals(False)
+
+        self.update_zoom_label()
+
+    def set_zoom(self, zoom: float):
+        zoom = max(0.1, min(zoom, 4.0))
+
+        cur = max(self.current_zoom, 1e-6)
+        factor = zoom / cur
+
+        self.view.scale(factor, factor)
+
+        self.current_zoom = zoom
+        self.user_zoomed = True
+        self.is_zoom_actual_size = False
 
         self.update_zoom_label()
 
@@ -865,6 +903,7 @@ class HeicViewer(QMainWindow):
         self.setWindowTitle(f"{path.name} — HEIC Viewer")
 
         img = Image.open(path)
+        self.update_image_info(path, img)
         qimage = ImageQt(img)
         pixmap = QPixmap.fromImage(qimage)
 
@@ -899,14 +938,6 @@ class HeicViewer(QMainWindow):
         # Clear any existing clip from previous crop
         if hasattr(self, 'pixmap_item') and self.pixmap_item:
             self.pixmap_item.clearClipRect()
-
-    # def _fit_image(self):
-    #     if hasattr(self, "pixmap_item"):
-    #         if not self.user_zoomed:
-    #             self.view.fitInView(
-    #                 self.pixmap_item,
-    #                 Qt.AspectRatioMode.KeepAspectRatio
-    #             )
 
     def next_image(self):
         if not self.files or self.crop_mode:
@@ -974,6 +1005,18 @@ class HeicViewer(QMainWindow):
     def set_ui_visible(self, visible: bool):
         self.top_bar_widget.setVisible(visible)
         self.bottom_bar_widget.setVisible(visible)
+
+    def update_image_info(self, path: Path, img: Image.Image):
+        width, height = img.size
+
+        size_bytes = path.stat().st_size
+        size_mb = size_bytes / (1024 * 1024)
+
+        ext = path.suffix.upper().replace(".", "")
+
+        self.statusBar().showMessage(
+            f"{width} × {height}   |   {size_mb:.2f} MB   |   {ext}"
+        )
 
 
 if __name__ == "__main__":
