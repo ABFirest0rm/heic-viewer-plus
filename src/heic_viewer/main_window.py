@@ -12,19 +12,25 @@ from PySide6.QtWidgets import (QMainWindow, QWidget,
                                QStackedLayout, QMessageBox,
                                QGraphicsRectItem, QFileDialog,
                                QProgressDialog, QApplication)
-from PySide6.QtCore import Qt, QRectF, QTimer
+from PySide6.QtCore import Qt, QRectF, QTimer, QSettings
 
 from .graphics_items import ClippedPixmapItem
 from .image_view import ImageView
-from .version import APP_NAME, APP_VERSION, check_for_updates
+from .version import (APP_NAME, APP_VERSION,
+                      check_for_updates, ORG_NAME,
+                      SETTINGS_APP_NAME)
 import pillow_heif
 pillow_heif.register_heif_opener()
 
 class HeicViewer(QMainWindow):
-    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".avif", ".webp"}
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif",
+                  ".avif", ".webp", ".tif", ".tiff",
+                  ".bmp", ".ico"}
+
 
     def __init__(self):
         super().__init__()
+        self.settings = QSettings(ORG_NAME, SETTINGS_APP_NAME)
 
         self._init_window()
         self._init_state()
@@ -44,6 +50,7 @@ class HeicViewer(QMainWindow):
         # File navigation
         self.files = None
         self.current_idx = None
+        self.last_open_dir = self.settings.value("last_open_dir", "", str)
 
         # View state
         self.current_zoom = 1.0
@@ -331,7 +338,7 @@ class HeicViewer(QMainWindow):
         self.redo_stack.clear()
         self._update_undo_redo_buttons()
 
-        # Convert crop rect to SCENE coordinates
+        # Convert crop rect to scene coordinates
         selection_scene_rect = self._crop_item.mapRectToScene(
             self._crop_item.rect()
         )
@@ -643,7 +650,7 @@ class HeicViewer(QMainWindow):
             elif suffix == ".png":
                 save_kwargs["compress_level"] = 9
             elif suffix == ".webp":
-                save_kwargs["quality"] = 90  # good balance
+                save_kwargs["quality"] = 90
                 save_kwargs["method"] = 6
 
             img.save(out_path, **save_kwargs)
@@ -688,7 +695,6 @@ class HeicViewer(QMainWindow):
             self.view.centerOn(center_scene)
             self._sync_zoom_ui_from_view()
         else:
-            # fit-to-view, but preserve rotation+flip
             self.user_zoomed = False
             QTimer.singleShot(0, self._fit_image)
 
@@ -779,7 +785,6 @@ class HeicViewer(QMainWindow):
 
         self.view.scale(factor, factor)
 
-        # self.current_zoom = zoom
         self.user_zoomed = True
         self.is_zoom_actual_size = False
         self._sync_zoom_ui_from_view()
@@ -792,15 +797,18 @@ class HeicViewer(QMainWindow):
         self._position_exit_fs_widget()
 
     def open_file(self):
+        start_dir = self.last_open_dir or str(Path.home() / "Pictures")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Image",
-            "Downloads",
-            "Images (*.heic *.heif *.avif *.jpg *.jpeg *.png *.webp);;All Files (*)",
+            start_dir,
+            "Images (*.heic *.heif *.avif *.jpg *.jpeg *.png *.webp *.tif *.tiff *.bmp *.ico);;All Files (*)",
         )
 
         if file_path:
             self.handle_file(file_path)
+            self.last_open_dir = str(Path(file_path).parent)
+            self.settings.setValue("last_open_dir", self.last_open_dir)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -871,10 +879,8 @@ class HeicViewer(QMainWindow):
         self.scene.addItem(self.pixmap_item)
         self.scene.setSceneRect(self.pixmap_item.boundingRect())
 
-        # self.view.resetTransform()
         self.stack.setCurrentIndex(1)
         QTimer.singleShot(0, self._fit_image)
-        # self.view.show()
 
     def reset_view_state(self):
         self.user_zoomed = False
@@ -933,7 +939,6 @@ class HeicViewer(QMainWindow):
         center_scene = self.view.mapToScene(self.view.viewport().rect().center())
 
         self._apply_base_transform()
-        # actual size = base transform + 1.0 zoom
         self.view.scale(1.0, 1.0)
         self.view.centerOn(center_scene)
 
