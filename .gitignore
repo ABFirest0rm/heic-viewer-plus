@@ -17,3 +17,7 @@ Thumbs.db
 
 # Legacy pre-refactor entry point
 src/main.py
+
+dist/
+build/
+*.spec

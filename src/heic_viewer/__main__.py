@@ -1,4 +1,4 @@
-from .app import run
+from heic_viewer.app import run
 
 if __name__ == "__main__":
     run()

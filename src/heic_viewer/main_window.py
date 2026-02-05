@@ -34,11 +34,21 @@ class HeicViewer(QMainWindow):
 
         self._init_window()
         self._init_state()
+        self._init_menu()
         self._init_shortcuts()
         self._init_view()
         self._init_controls()
         self._init_layout()
+
         QTimer.singleShot(0, self._check_for_updates)
+
+    def _init_menu(self):
+        menubar = self.menuBar()
+
+        self.help_menu = menubar.addMenu("Help")
+
+        about_action = self.help_menu.addAction("About")
+        about_action.triggered.connect(self.show_about_dialog)
 
     def _init_window(self):
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
@@ -101,9 +111,7 @@ class HeicViewer(QMainWindow):
         self.view = ImageView(self.scene, self, self)
         self.view.setAcceptDrops(False)
         self.view.setStyleSheet("background: transparent; border: none;")
-        self.view.setRenderHints(
-            QPainter.Antialiasing | QPainter.SmoothPixmapTransform
-        )
+        self.view.setRenderHints(QPainter.SmoothPixmapTransform)
         self.view.zoomed.connect(self.on_wheel_zoom)
         self.view.resetRequested.connect(self.reset_zoom)
 
@@ -880,6 +888,7 @@ class HeicViewer(QMainWindow):
         self.scene.setSceneRect(self.pixmap_item.boundingRect())
 
         self.stack.setCurrentIndex(1)
+        self.help_menu.menuAction().setVisible(False)
         QTimer.singleShot(0, self._fit_image)
 
     def reset_view_state(self):
@@ -1013,3 +1022,18 @@ class HeicViewer(QMainWindow):
                 "Update Available",
                 f"New version available: {latest}\n\nVisit GitHub to download."
             )
+
+    def show_about_dialog(self):
+        QMessageBox.about(
+            self,
+            f"About {APP_NAME}",
+            (
+                f"<b>{APP_NAME}</b><br>"
+                f"Version {APP_VERSION}<br><br>"
+                "A lightweight desktop tool to view, crop, and convert modern image formats.<br><br>"
+                "Built with PySide6 (Qt), Pillow, and pillow-heif.<br>"
+                'Project page: <a href="https://github.com/ABFirest0rm/heic-viewer-plus">'
+                "github.com/ABFirest0rm/heic-viewer-plus</a><br>"
+                "Licenses available on GitHub."
+            ),
+        )
