@@ -889,7 +889,13 @@ class HeicViewer(QMainWindow):
 
         self.stack.setCurrentIndex(1)
         self.help_menu.menuAction().setVisible(False)
-        QTimer.singleShot(0, self._fit_image)
+        self.view.setVisible(False)
+
+        QTimer.singleShot(0, self._final_fit)
+
+    def _final_fit(self):
+        self._fit_image()
+        self.view.setVisible(True)
 
     def reset_view_state(self):
         self.user_zoomed = False
