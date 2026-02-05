@@ -14,3 +14,6 @@ Thumbs.db
 .idea/
 
 /src/another.py
+
+# Legacy pre-refactor entry point
+src/main.py
