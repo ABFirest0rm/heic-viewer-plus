@@ -7,7 +7,7 @@ def version_string():
     return f"{APP_NAME} v{APP_VERSION}"
 
 GITHUB_VERSION_URL = (
-    "https://raw.githubusercontent.com/YOURNAME/heic-viewer/main/version.txt"
+    "https://raw.githubusercontent.com/ABFirst0rm/heic-viewer/main/version.txt"
 )
 
 def check_for_updates(current_version):
