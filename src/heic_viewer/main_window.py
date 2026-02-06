@@ -47,6 +47,20 @@ class HeicViewer(QMainWindow):
 
         self.help_menu = menubar.addMenu("Help")
 
+        check_now = self.help_menu.addAction("Check for updates now")
+        check_now.triggered.connect(lambda: self._check_for_updates(True))
+
+        self.check_updates_action = self.help_menu.addAction(
+            "Check for updates automatically"
+        )
+        self.check_updates_action.setCheckable(True)
+        self.check_updates_action.setChecked(self.check_updates_enabled)
+        self.check_updates_action.triggered.connect(
+            self._toggle_check_for_updates
+        )
+
+        self.help_menu.addSeparator()
+
         about_action = self.help_menu.addAction("About")
         about_action.triggered.connect(self.show_about_dialog)
 
@@ -61,6 +75,11 @@ class HeicViewer(QMainWindow):
         self.files = None
         self.current_idx = None
         self.last_open_dir = self.settings.value("last_open_dir", "", str)
+        self.check_updates_enabled = self.settings.value("check_for_updates", True, bool
+        )
+        self.ignore_this_version = self.settings.value(
+            "ignore_this_version", "", str
+        )
 
         # View state
         self.current_zoom = 1.0
@@ -1017,17 +1036,57 @@ class HeicViewer(QMainWindow):
 
         self.exit_fs_widget.setGeometry(x, y, size.width(), size.height())
 
-    def _check_for_updates(self):
+    def _check_for_updates(self, user_initiated=False):
+        if not user_initiated and not self.check_updates_enabled:
+            return
         try:
             latest = check_for_updates(APP_VERSION)
         except Exception:
+            if user_initiated:
+                QMessageBox.warning(
+                    self,
+                    "Update Check Failed",
+                    "Could not connect to the update server."
+                )
             return
+
+        if not latest:
+            if user_initiated:
+                QMessageBox.information(
+                    self,
+                    "Up to Date",
+                    "You are already using the latest version."
+                )
+                return
+
+        if not user_initiated and latest == self.ignore_this_version:
+            return
+
         if latest:
-            QMessageBox.information(
-                self,
-                "Update Available",
-                f"New version available: {latest}\n\nVisit GitHub to download."
-            )
+            self._show_update_dialog(latest)
+
+    def _show_update_dialog(self, latest_version):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Update Available")
+        msg.setText(
+            f"New version available: {latest_version}\n\n"
+            "Visit GitHub to download."
+        )
+
+        ignore_btn = msg.addButton(
+            "Don't remind me again for this version",
+            QMessageBox.ActionRole
+        )
+
+        ok_btn = msg.addButton(QMessageBox.Ok)
+
+        msg.exec()
+
+        clicked = msg.clickedButton()
+
+        if clicked == ignore_btn:
+            self.ignore_this_version = latest_version
+            self.settings.setValue("ignore_this_version", latest_version)
 
     def show_about_dialog(self):
         QMessageBox.about(
@@ -1043,3 +1102,7 @@ class HeicViewer(QMainWindow):
                 "Licenses available on GitHub."
             ),
         )
+
+    def _toggle_check_for_updates(self, checked: bool):
+        self.check_updates_enabled = checked
+        self.settings.setValue("check_for_updates", checked)
