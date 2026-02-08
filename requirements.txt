@@ -1,4 +1,4 @@
-requests
-PySide6
-Pillow
-pillow-heif
+PySide6==6.10.1
+Pillow==12.1.0
+pillow-heif==1.2.0
+requests==2.32.5
