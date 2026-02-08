@@ -916,6 +916,9 @@ class HeicViewer(QMainWindow):
         self._fit_image()
         self.view.setVisible(True)
 
+        if self.isFullScreen() and self.exit_fs_widget.isVisible():
+            QTimer.singleShot(0, self._position_exit_fs_widget)
+
     def reset_view_state(self):
         self.user_zoomed = False
         self.view_rotation = 0
