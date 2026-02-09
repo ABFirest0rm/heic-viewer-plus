@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (QMainWindow, QWidget,
                                QPushButton, QHBoxLayout,
                                QStackedLayout, QMessageBox,
                                QGraphicsRectItem, QFileDialog,
-                               QProgressDialog, QApplication)
-from PySide6.QtCore import Qt, QRectF, QTimer, QSettings
+                               QProgressDialog, QApplication, QToolTip, QProgressBar)
+from PySide6.QtCore import Qt, QRectF, QTimer, QSettings, QObject, Signal, QThreadPool, Slot, QRunnable, QPoint, QThread
 
 from .graphics_items import ClippedPixmapItem
 from .image_view import ImageView
@@ -22,12 +22,108 @@ from .version import (APP_NAME, APP_VERSION,
 import pillow_heif
 pillow_heif.register_heif_opener()
 
+class _LoadSignals(QObject):
+    loaded = Signal(int, object, dict, int)
+    failed = Signal(int, str, int)
+
+class _ImageLoadTask(QRunnable):
+    def __init__(self, idx: int, path: Path, gen: int):
+        super().__init__()
+        self.setAutoDelete(False)
+        self.idx = idx
+        self.path = path
+        self.gen = gen
+        self.signals = _LoadSignals()
+    @staticmethod
+    def _parse_exif_datetime(dt):
+        try:
+            return dt.replace(":", "-", 2)[:16]
+        except Exception:
+            return None
+    @staticmethod
+    def _convert_gps(coord, ref):
+        try:
+            d = coord[0][0] / coord[0][1]
+            m = coord[1][0] / coord[1][1]
+            s = coord[2][0] / coord[2][1]
+            val = d + m / 60 + s / 3600
+            return -val if ref in ("S", "W") else val
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_str(x):
+        if isinstance(x, bytes):
+            try:
+                return x.decode(errors="ignore")
+            except Exception:
+                return None
+        return str(x) if x else None
+
+    def run(self):
+        try:
+            try:
+                size_bytes = self.path.stat().st_size
+            except Exception:
+                size_bytes = None
+
+            with Image.open(self.path) as img:
+                img = ImageOps.exif_transpose(img)
+                img.load()
+
+                w, h = img.size
+                qimg = ImageQt(img).copy()
+
+                exif = img.getexif() or {}
+
+                date_taken = None
+                dt = exif.get(36867)
+                if dt:
+                    date_taken = _ImageLoadTask._parse_exif_datetime(dt)
+
+                make = _ImageLoadTask._safe_str(exif.get(271))
+                model = _ImageLoadTask._safe_str(exif.get(272))
+                lens = _ImageLoadTask._safe_str(exif.get(42036))
+
+                lat = lon = None
+                gps = exif.get(34853)
+
+                lat = lon = None
+
+                if isinstance(gps, dict):
+                    lat = _ImageLoadTask._convert_gps(
+                        gps.get(2),
+                        gps.get(1)
+                    )
+                    lon = _ImageLoadTask._convert_gps(
+                        gps.get(4),
+                        gps.get(3)
+                    )
+                info = {
+                    "w": w,
+                    "h": h,
+                    "bytes": size_bytes,
+                    "date": date_taken,
+                    "make": make,
+                    "model": model,
+                    "lens": lens,
+                    "lat": lat,
+                    "lon": lon,
+                }
+
+            self.signals.loaded.emit(self.idx, qimg, info, self.gen)
+
+        except Exception as e:
+            try:
+                self.signals.failed.emit(self.idx, str(e), self.gen)
+            except Exception:
+                pass
+
+
 class HeicViewer(QMainWindow):
     IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif",
                   ".avif", ".webp", ".tif", ".tiff",
                   ".bmp", ".ico"}
-
-
     def __init__(self):
         super().__init__()
         self.settings = QSettings(ORG_NAME, SETTINGS_APP_NAME)
@@ -69,6 +165,16 @@ class HeicViewer(QMainWindow):
         self.resize(900, 600)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.StrongFocus)
+        QToolTip.setFont(self.font())
+        self.setStyleSheet(self.styleSheet() + """
+        QToolTip {
+            background-color: rgba(20, 20, 20, 220);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 40);
+            padding: 6px 10px;
+            border-radius: 6px;
+        }
+        """)
 
     def _init_state(self):
         # File navigation
@@ -80,6 +186,31 @@ class HeicViewer(QMainWindow):
         self.ignore_this_version = self.settings.value(
             "ignore_this_version", "", str
         )
+
+        self._tasks = {}
+        self._is_loading = False
+
+        self._status_path = None
+        self._status_wh = None
+        self._status_bytes = None
+        self._status_info = None
+        self._status_date = None
+        self._status_make = None
+        self._status_model = None
+        self._status_lens = None
+        self._status_lat = None
+        self._status_lon = None
+
+        self._preload_radius = 3
+        self._nav_dir = +1
+
+        # Preload / cache
+        self._pool = QThreadPool.globalInstance()
+        self._pool.setMaxThreadCount(max(2, QThread.idealThreadCount()))
+
+        self._preload_cache = {}
+        self._preload_inflight = set()
+        self._preload_gen = 0
 
         # View state
         self.current_zoom = 1.0
@@ -185,7 +316,7 @@ class HeicViewer(QMainWindow):
         self.flip_h_btn.clicked.connect(self.flip_horizontal)
 
         self.flip_v_btn = QPushButton("⇅")
-        self.flip_h_btn.setToolTip("Flip Horizontal (Ctrl + Shift + ← / →)")
+        self.flip_v_btn.setToolTip("Flip Horizontal (Ctrl + Shift + ↑ / ↓)")
         self.flip_v_btn.clicked.connect(self.flip_vertical)
 
         self.crop_btn = QPushButton("Crop")
@@ -244,6 +375,30 @@ class HeicViewer(QMainWindow):
         exit_fs_layout.addStretch()
         exit_fs_layout.addWidget(self.exit_fullscreen_btn)
         self.exit_fs_widget.setVisible(False)
+
+        self.loading_overlay = QWidget(self)
+        self.loading_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.loading_overlay.setStyleSheet("""
+            QWidget {
+                background: rgba(0, 0, 0, 120);
+            }
+        """)
+        self.loading_overlay.setVisible(False)
+
+        overlay_layout = QVBoxLayout(self.loading_overlay)
+        overlay_layout.setAlignment(Qt.AlignCenter)
+
+        self.loading_label = QLabel("Loading image…")
+        self.loading_label.setStyleSheet("color: white; font-size: 14px;")
+        self.loading_label.setAlignment(Qt.AlignCenter)
+
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setRange(0, 0)
+        self.loading_bar.setFixedWidth(240)
+
+        overlay_layout.addWidget(self.loading_label)
+        overlay_layout.addSpacing(8)
+        overlay_layout.addWidget(self.loading_bar)
 
     def _init_layout(self):
         central = QWidget(self)
@@ -318,6 +473,40 @@ class HeicViewer(QMainWindow):
         self.stack.addWidget(start_page)
         self.stack.addWidget(viewer_page)
         self.stack.setCurrentIndex(0)
+
+
+    def _position_loading_overlay(self):
+        if not self.loading_overlay.isVisible():
+            return
+
+        rect = self.centralWidget().rect()
+        self.loading_overlay.setGeometry(rect)
+        self.loading_overlay.raise_()
+
+    def _set_loading(self, loading: bool, text="Loading…"):
+        self._is_loading = loading
+
+        widgets = (
+            self.top_bar_widget,
+            self.bottom_bar_widget,
+        )
+
+        for w in widgets:
+            w.setEnabled(not loading)
+
+        if loading:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self.loading_label.setText(text)
+            self.loading_overlay.setVisible(True)
+            self._position_loading_overlay()
+            self.loading_overlay.raise_()
+            self.statusBar().showMessage(text, 0)
+
+            QApplication.processEvents()
+        else:
+            QApplication.restoreOverrideCursor()
+            self.loading_overlay.setVisible(False)
+            self._restore_statusbar_info()
 
     def _set_crop_ui(self, enabled: bool):
         self.crop_btn.setEnabled(not enabled)
@@ -541,7 +730,7 @@ class HeicViewer(QMainWindow):
             "JPEG (*.jpg *.jpeg);;"
             "PNG (*.png);;"
             "HEIC (*.heic *.heif);;"
-            "AVIF (*.avif);;"""
+            "AVIF (*.avif);;"
             "WEBP (*.webp)"
         )
         out_path, selected_filter = QFileDialog.getSaveFileName(
@@ -611,7 +800,8 @@ class HeicViewer(QMainWindow):
         self.statusBar().showMessage(
             f"Converted to {Path(out_path).name}", 3000
         )
-        QTimer.singleShot(3000, lambda: self.update_image_info(current_path, img))
+        QTimer.singleShot(3000, self._restore_statusbar_info)
+
 
     def save_as_view(self):
         if self.files is None or self.current_idx is None:
@@ -709,7 +899,7 @@ class HeicViewer(QMainWindow):
         self.statusBar().showMessage(
             f"Saved as {Path(out_path).name}", 3000
         )
-        QTimer.singleShot(3000, lambda: self.update_image_info(current_path, img))
+        QTimer.singleShot(3000, self._restore_statusbar_info)
 
 
     def apply_view_rotation(self, img):
@@ -718,7 +908,7 @@ class HeicViewer(QMainWindow):
         return img.rotate(-self.view_rotation, expand=True)
 
     def rotate_and_flip(self, delta):
-        if not hasattr(self, "pixmap_item"):
+        if not hasattr(self, "pixmap_item") or self._is_loading:
             return
 
         self.view_rotation = (self.view_rotation + delta) % 360
@@ -831,10 +1021,13 @@ class HeicViewer(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._position_loading_overlay()
         self._fit_image()
         self._position_exit_fs_widget()
 
     def open_file(self):
+        if self._is_loading:
+            return
         start_dir = self.last_open_dir or str(Path.home() / "Pictures")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -853,7 +1046,7 @@ class HeicViewer(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        if self.crop_mode:
+        if self.crop_mode or self._is_loading:
             if not self.confirm_discard_crop():
                 return
             self.clear_crop_preview()
@@ -888,30 +1081,65 @@ class HeicViewer(QMainWindow):
             if path not in files:
                 return
 
+            self._bump_preload_gen()
+
             self.files = files
             self.current_idx = files.index(path)
 
 
-        self.reset_view_state()
         self.setWindowTitle(f"{path.name} — {APP_NAME} v{APP_VERSION}")
 
-        try:
-            img = Image.open(path)
-            img = ImageOps.exif_transpose(img)
-            img.load()
+        cached = self._preload_cache.get(self.current_idx)
+        if cached is not None:
+            print("CACHE HIT", self.current_idx, path.name)
 
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Failed to Open Image",
-                f"Could not open the image:\n\n{path.name}\n\n{str(e)}"
-            )
+            cached_path, pixmap, info = cached
+            if cached_path == path:
+                self.update_image_info(
+                    path,
+                    wh=(info["w"], info["h"]),
+                    bytes=info.get("bytes"),
+                    info=info,
+                )
+
+                self._display_pixmap(pixmap)
+                return
+            else:
+                print("CACHE MISMATCH", self.current_idx, "cache:", cached_path.name, "want:", path.name)
+
+        if self.current_idx in self._preload_inflight:
+            print("WAITING (no sync load)", self.current_idx, path.name)
+            self._status_path = path
+            self._status_wh = None
+            msg = f"{path.name}   |   Loading…"
+            self.statusBar().showMessage(msg, 0)
+            self._set_loading(True, msg)
+            self.statusBar().showMessage("Loading…", 0)
             return
 
-        self.update_image_info(path, img)
-        qimage = ImageQt(img)
-        pixmap = QPixmap.fromImage(qimage)
 
+        print("CACHE MISS", self.current_idx, path.name, "inflight:", sorted(self._preload_inflight))
+        self._status_path = path
+        self._status_wh = None
+        self.statusBar().showMessage(f"{path.name}   |   Loading…", 0)
+        self._set_loading(True, f"{path.name}   |   Loading…")
+        self._request_load(self.current_idx, path, priority=10)
+        return
+
+    def _request_load(self, idx, path, priority= 0):
+        gen = self._preload_gen
+        key = (gen, idx)
+        if idx in self._preload_inflight:
+            return
+        task = _ImageLoadTask(idx, path, gen)
+        task.signals.loaded.connect(self._on_preload_loaded)
+        task.signals.failed.connect(self._on_preload_failed)
+        self._preload_inflight.add(idx)
+        self._tasks[key] = task
+        self._pool.start(task, priority)
+
+    def _display_pixmap(self, pixmap: QPixmap):
+        self.reset_view_state()
         self.scene.clear()
         self.pixmap_item = ClippedPixmapItem(pixmap)
         self.scene.addItem(self.pixmap_item)
@@ -922,6 +1150,7 @@ class HeicViewer(QMainWindow):
         self.view.setVisible(False)
 
         QTimer.singleShot(0, self._final_fit)
+        QTimer.singleShot(0, self._preload_neighbors)
 
     def _final_fit(self):
         self._fit_image()
@@ -946,19 +1175,40 @@ class HeicViewer(QMainWindow):
         if hasattr(self, "pixmap_item") and self.pixmap_item:
             self.pixmap_item.clearClipRect()
 
+    def toast(self, text: str, ms: int = 1200):
+        anchor = self.view.viewport() if hasattr(self, "view") and self.view is not None else self
+
+        r = anchor.rect()
+        local_pos = QPoint(r.center().x(), r.bottom() - 30)
+        global_pos = anchor.mapToGlobal(local_pos)
+
+        QToolTip.showText(global_pos, text, anchor, r, ms)
+
     def next_image(self):
-        if not self.files or self.crop_mode:
+        if self._is_loading or not self.files or self.crop_mode:
             return
+        if self.current_idx >= len(self.files) - 1:
+            self.toast("Last image")
+            return
+
+        self._nav_dir = +1
         self.current_idx = min(self.current_idx + 1, len(self.files) - 1)
         self.handle_file(str(self.files[self.current_idx]), from_navigation=True)
 
     def prev_image(self):
         if not self.files or self.crop_mode:
             return
+        if self.current_idx <= 0:
+            self.toast("First image")
+            return
+
+        self._nav_dir = -1
         self.current_idx = max(self.current_idx - 1, 0)
         self.handle_file(str(self.files[self.current_idx]), from_navigation=True)
 
     def toggle_fullscreen(self):
+        if self._is_loading:
+            return
         if self.isFullScreen():
             self.showNormal()
             self.top_bar_widget.setVisible(True)
@@ -972,7 +1222,7 @@ class HeicViewer(QMainWindow):
             QTimer.singleShot(0, self._position_exit_fs_widget)
 
     def zoom_actual_size(self):
-        if not hasattr(self, "pixmap_item"):
+        if not hasattr(self, "pixmap_item") or self._is_loading:
             return
 
         if self.is_zoom_actual_size:
@@ -1010,28 +1260,74 @@ class HeicViewer(QMainWindow):
         self.top_bar_widget.setVisible(visible)
         self.bottom_bar_widget.setVisible(visible)
 
-    def update_image_info(self, path, img):
-        width, height = img.size
+    def update_image_info(self, path, wh=None, bytes=None, info=None):
+        self._status_path = path
+        self._status_wh = wh
+        self._status_bytes = bytes
 
-        size_bytes = path.stat().st_size
-        size_mb = size_bytes / (1024 * 1024)
+        self._status_info = info or {}
+        self._status_date = self._status_info.get("date")
+        self._status_make = self._status_info.get("make")
+        self._status_model = self._status_info.get("model")
+        self._status_lens = self._status_info.get("lens")
+        self._status_lat = self._status_info.get("lat")
+        self._status_lon = self._status_info.get("lon")
+
+        if not wh:
+            self.statusBar().showMessage(path.name)
+            return
+
+        width, height = wh
+
+        if bytes is not None:
+            size_bytes = int(bytes)
+        else:
+            try:
+                size_bytes = path.stat().st_size
+            except Exception:
+                size_bytes = None
 
         ext = path.suffix.upper().replace(".", "")
 
-        self.statusBar().showMessage(
-            f"{width} × {height}   |   {size_mb:.2f} MB   |   {ext}"
+        parts = [f"{width} × {height}"]
+
+        if size_bytes is not None:
+            size_mb = size_bytes / (1024 * 1024)
+            parts.append(f"{size_mb:.2f} MB")
+
+        if self._status_date:
+            parts.append(self._status_date)
+
+        cam = " ".join(
+            x for x in (self._status_make, self._status_model) if x
+        )
+        if cam:
+            parts.append(cam)
+
+        parts.append(ext)
+
+        self.statusBar().showMessage("   |   ".join(parts))
+
+    def _restore_statusbar_info(self):
+        if not self._status_path:
+            return
+
+        self.update_image_info(
+            self._status_path,
+            wh=self._status_wh,
+            bytes=self._status_bytes,
+            info=self._status_info,
         )
 
-
     def flip_horizontal(self):
-        if not hasattr(self, "pixmap_item"):
+        if not hasattr(self, "pixmap_item") or self._is_loading:
             return
 
         self.flip_h = not self.flip_h
         self.rotate_and_flip(0)
 
     def flip_vertical(self):
-        if not hasattr(self, "pixmap_item"):
+        if not hasattr(self, "pixmap_item") or self._is_loading:
             return
 
         self.flip_v = not self.flip_v
@@ -1120,3 +1416,86 @@ class HeicViewer(QMainWindow):
     def _toggle_check_for_updates(self, checked: bool):
         self.check_updates_enabled = checked
         self.settings.setValue("check_for_updates", checked)
+
+    def _bump_preload_gen(self):
+        self._preload_gen += 1
+        self._preload_inflight.clear()
+
+    def _trim_preload_cache(self):
+        if self.current_idx is None:
+            return
+        r = self._preload_radius
+        keep = set(range(self.current_idx - r, self.current_idx + r + 1))
+        self._preload_cache = {
+            k: self._preload_cache[k]
+            for k in keep
+            if k in self._preload_cache
+        }
+
+    def _preload_neighbors(self):
+        if not self.files or self.current_idx is None:
+            return
+
+        self._trim_preload_cache()
+
+        gen = self._preload_gen
+        r = self._preload_radius
+        d = getattr(self, "_nav_dir", +1)
+
+        neighbors = []
+        for step in range(1, r + 1):
+            neighbors.append(self.current_idx + d * step)
+        for step in range(1, r + 1):
+            neighbors.append(self.current_idx - d * step)
+
+        for idx in neighbors:
+            if idx < 0 or idx >= len(self.files):
+                continue
+            if idx in self._preload_cache or idx in self._preload_inflight:
+                continue
+
+            self._request_load(idx, self.files[idx], priority=0)
+
+    @Slot(int, object, dict, int)
+    def _on_preload_loaded(self, idx, qimg, info, gen):
+        self._tasks.pop((gen, idx), None)
+        if gen != self._preload_gen:
+            return
+
+        self._preload_inflight.discard(idx)
+
+        w = int(info.get("w", 0))
+        h = int(info.get("h", 0))
+        b = info.get("bytes", None)
+
+        pixmap = QPixmap.fromImage(qimg)
+        self._preload_cache[idx] = (self.files[idx], pixmap, info)
+
+        self._trim_preload_cache()
+
+        if self.current_idx == idx:
+            path = self.files[idx]
+            self.update_image_info(
+                path,
+                wh=(w, h),
+                bytes=b,
+                info=info,
+            )
+
+            self._display_pixmap(pixmap)
+            self._set_loading(False)
+
+    @Slot(int, str, int)
+    def _on_preload_failed(self, idx, err, gen):
+        self._tasks.pop((gen, idx), None)
+        if gen != self._preload_gen:
+            return
+
+        self._preload_inflight.discard(idx)
+
+        if self.current_idx == idx:
+            self._set_loading(False)
+            path = self.files[idx] if self.files else None
+            name = path.name if path else "image"
+            QMessageBox.critical(self, "Failed to Open Image", f"{name}\n\n{err}")
+            self.statusBar().showMessage("Failed to load image", 2000)
