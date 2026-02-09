@@ -258,11 +258,22 @@ class HeicViewer(QMainWindow):
         start_page = QWidget()
         start_layout = QVBoxLayout(start_page)
 
+        hint = QLabel("Drag & Drop an Image — or Click Below")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet("""
+        QLabel {
+        font-size: 18px;
+        color: #888;
+        }
+        """)
+
         open_center = QPushButton("Open Image")
         open_center.setFixedWidth(180)
         open_center.clicked.connect(self.open_file)
 
         start_layout.addStretch()
+        start_layout.addWidget(hint)
+        start_layout.addSpacing(12)
         start_layout.addWidget(open_center, alignment=Qt.AlignCenter)
         start_layout.addStretch()
 
