@@ -27,7 +27,7 @@ It opens modern image formats instantly, lets you view images and preview edits 
 - **⚡ Asymmetric Predictive Caching:** A background preloading engine predicts navigation direction and buffers upcoming images for near zero-latency browsing
 - **Viewer + Editor:** View images, crop, rotate, flip, and export — all in one lightweight tool
 - **Non-Destructive Workflow:** All edits are applied as **view transforms**; the original file is never modified until you click **Save As**
-- **Lightweight Undo / Redo:** Instantly undo or redo crops and rotations without reloading image data
+- **Lightweight Undo / Redo:** Implemented as a view-state stack, avoiding re-decodes and keeping interactions instant
 - **Smart Zoom:** Dedicated **1:1 Pixel Mode** (`Ctrl+F`) for checking focus and sharpness
 - **Conversion & Export:** Save edited images as **JPEG, PNG, WebP, HEIC, or AVIF**
 - **EXIF Metadata Display:** Dimensions, file size, date, camera make/model shown in the status bar
@@ -38,10 +38,9 @@ It opens modern image formats instantly, lets you view images and preview edits 
 
 HeicViewerPlus is built with **PySide6 (Qt)** and **Pillow**, with a strong focus on performance and responsiveness:
 
-- **Multi-threaded Pipeline:** Uses `QThreadPool` to move file I/O and decoding off the GUI thread, keeping the interface responsive even for 50MB+ HEIC files
-- **Asymmetric Predictive Caching:** The preload radius is biased based on navigation direction (forward vs backward), prioritizing the images you are most likely to view next instead of loading symmetrically
-- **Memory-Bound Asymmetric Window:** The cache maintains a direction-biased sliding window instead of a fixed radius, preventing memory growth while prioritizing the most likely next images
-
+- **Multi-threaded Pipeline:** Uses `QThreadPool` to move file I/O and decoding off the GUI thread, keeping the interface responsive even for large HEIC files
+- **Asymmetric Predictive Caching:** Maintains a direction-aware preload window that skews based on navigation intent, prioritizing the images you are most likely to view next instead of loading symmetrically
+- **Memory-Bound Asymmetric Window:** The cache maintains a direction-biased sliding window instead of a fixed radius, preventing memory growth while still prioritizing the most likely next images
 - **Affine View Transforms:** Zoom, rotation, and crop previews rely on Qt’s graphics-view transformations instead of mutating pixel buffers, ensuring zero quality loss during viewing
 
 ---
