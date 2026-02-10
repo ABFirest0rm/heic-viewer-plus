@@ -259,6 +259,7 @@ class HeicViewer(QMainWindow):
 
         QShortcut(QKeySequence(Qt.Key_Escape), self, activated=self._on_escape)
 
+
     def _init_view(self):
         self.scene = QGraphicsScene(self)
         self.view = ImageView(self.scene, self, self)
@@ -349,7 +350,8 @@ class HeicViewer(QMainWindow):
 
         self.redo_btn = QPushButton("Redo Crop")
         self.redo_btn.setToolTip(
-            "CTRL + Y\n"
+            "CTRL + Y (Windows)\n"
+            "CTRL + Shift + Z (Linux)\n"
             "CAUTION:\n"
             "Reapplies the last undone crop.\n"
             "Any rotation or flip applied after that crop will be lost."
