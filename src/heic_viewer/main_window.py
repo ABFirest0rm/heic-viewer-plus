@@ -1148,6 +1148,10 @@ class HeicViewer(QMainWindow):
         self.flip_h = False
         self.flip_v = False
 
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._update_undo_redo_buttons()
+
         self.save_as_btn.setEnabled(False)
         self.view.resetTransform()
 
