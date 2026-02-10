@@ -17,7 +17,7 @@
 While Windows supports formats like AVIF and WebP, support for **HEIC** (widely used by modern smartphones) is inconsistent and often requires paid extensions or file conversions.
 
 **HeicViewerPlus** is a lightweight, standalone **viewer-plus** tool designed to fix this gap.
-It opens modern image formats instantly, lets you **view images and preview edits** such as crop and rotation, and only writes to disk when you explicitly choose **Save As**.
+It opens modern image formats instantly, lets you view images and preview edits such as crop and rotation, and only writes to disk when you explicitly choose **Save As**.
 
 ---
 
