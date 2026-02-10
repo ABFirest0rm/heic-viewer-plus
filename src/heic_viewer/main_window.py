@@ -27,19 +27,21 @@ class _LoadSignals(QObject):
     failed = Signal(int, str, int)
 
 class _ImageLoadTask(QRunnable):
-    def __init__(self, idx: int, path: Path, gen: int):
+    def __init__(self, idx, path, gen):
         super().__init__()
         self.setAutoDelete(False)
         self.idx = idx
         self.path = path
         self.gen = gen
         self.signals = _LoadSignals()
+
     @staticmethod
     def _parse_exif_datetime(dt):
         try:
             return dt.replace(":", "-", 2)[:16]
         except Exception:
             return None
+
     @staticmethod
     def _convert_gps(coord, ref):
         try:
@@ -62,6 +64,7 @@ class _ImageLoadTask(QRunnable):
 
     def run(self):
         try:
+
             try:
                 size_bytes = self.path.stat().st_size
             except Exception:
@@ -201,7 +204,7 @@ class HeicViewer(QMainWindow):
         self._status_lat = None
         self._status_lon = None
 
-        self._preload_radius = 3
+        self._preload_radius = 4
         self._nav_dir = +1
 
         # Preload / cache
@@ -236,7 +239,7 @@ class HeicViewer(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_Right), self, activated=self.next_image)
         QShortcut(QKeySequence(Qt.Key_Left), self, activated=self.prev_image)
 
-        QShortcut(QKeySequence(Qt.Key_F11), self, activated=self.toggle_fullscreen)
+        QShortcut(QKeySequence("F"), self, activated=self.toggle_fullscreen)
 
         QShortcut(QKeySequence.Undo, self, activated=self.undo)
         QShortcut(QKeySequence.Redo, self, activated=self.redo)
@@ -279,7 +282,9 @@ class HeicViewer(QMainWindow):
         self.zoom_label.setAlignment(Qt.AlignCenter)
 
         self.actual_size_btn = QPushButton("1:1")
-        self.actual_size_btn.setToolTip("Actual Size 1:1 (Ctrl+F)")
+        self.actual_size_btn.setToolTip("Displays the image at native resolution (Ctrl+F)\n"
+                                        "One image pixel = one screen pixel\n"
+                                        "Pan to view other areas.")
         self.actual_size_btn.clicked.connect(self.zoom_actual_size)
 
         # Buttons
@@ -354,7 +359,7 @@ class HeicViewer(QMainWindow):
         self.redo_btn.clicked.connect(self.redo)
 
         self.fullscreen_btn = QPushButton("⛶")
-        self.fullscreen_btn.setToolTip("Fullscreen mode")
+        self.fullscreen_btn.setToolTip("Fullscreen mode (F)")
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
 
         self.exit_fullscreen_btn = QPushButton("✕")
@@ -501,8 +506,8 @@ class HeicViewer(QMainWindow):
             self._position_loading_overlay()
             self.loading_overlay.raise_()
             self.statusBar().showMessage(text, 0)
-
             QApplication.processEvents()
+
         else:
             QApplication.restoreOverrideCursor()
             self.loading_overlay.setVisible(False)
@@ -968,31 +973,6 @@ class HeicViewer(QMainWindow):
             return
         self._sync_zoom_ui_from_view()
 
-    def _fit_scene_rect_preserving_base(self, rect):
-
-        if rect.isEmpty():
-            return
-
-        self._apply_base_transform()
-        vp = self.view.viewport().rect()
-        mapped = self.view.transform().mapRect(rect)
-
-        if mapped.isEmpty():
-            return
-
-        margin = 6.0
-        avail_w = max(1.0, vp.width() - margin)
-        avail_h = max(1.0, vp.height() - margin)
-
-        rw = max(1e-6, mapped.width())
-        rh = max(1e-6, mapped.height())
-
-        s = min(avail_w / rw, avail_h / rh)
-
-        self.view.scale(s, s)
-        self.view.centerOn(rect.center())
-        self._sync_zoom_ui_from_view()
-
     def _transform_scale(self, t):
         return math.hypot(t.m11(), t.m12())
 
@@ -1101,9 +1081,9 @@ class HeicViewer(QMainWindow):
                     bytes=info.get("bytes"),
                     info=info,
                 )
-
                 self._display_pixmap(pixmap)
                 return
+
             else:
                 print("CACHE MISMATCH", self.current_idx, "cache:", cached_path.name, "want:", path.name)
 
@@ -1175,7 +1155,7 @@ class HeicViewer(QMainWindow):
         if hasattr(self, "pixmap_item") and self.pixmap_item:
             self.pixmap_item.clearClipRect()
 
-    def toast(self, text: str, ms: int = 1200):
+    def toast(self, text, ms= 1200):
         anchor = self.view.viewport() if hasattr(self, "view") and self.view is not None else self
 
         r = anchor.rect()
@@ -1255,10 +1235,6 @@ class HeicViewer(QMainWindow):
             self.reset_zoom()
             self.is_zoom_actual_size = False
             return
-
-    def set_ui_visible(self, visible: bool):
-        self.top_bar_widget.setVisible(visible)
-        self.bottom_bar_widget.setVisible(visible)
 
     def update_image_info(self, path, wh=None, bytes=None, info=None):
         self._status_path = path
@@ -1425,7 +1401,20 @@ class HeicViewer(QMainWindow):
         if self.current_idx is None:
             return
         r = self._preload_radius
-        keep = set(range(self.current_idx - r, self.current_idx + r + 1))
+        d = getattr(self, "_nav_dir", +1)
+
+        ind_dir_rad = math.ceil(2 / 3 * 2 * r)
+        opp_dir_rad = 2 * r - ind_dir_rad
+
+        if d > 0:
+            start = max(0, self.current_idx - opp_dir_rad)
+            end = min(len(self.files), self.current_idx + ind_dir_rad + 1)
+        else:
+            start = max(0, self.current_idx - ind_dir_rad)
+            end = min(len(self.files), self.current_idx + opp_dir_rad + 1)
+
+        keep = set(range(start, end))
+
         self._preload_cache = {
             k: self._preload_cache[k]
             for k in keep
@@ -1437,18 +1426,15 @@ class HeicViewer(QMainWindow):
             return
 
         self._trim_preload_cache()
-
-        gen = self._preload_gen
         r = self._preload_radius
         d = getattr(self, "_nav_dir", +1)
 
         ind_dir_rad = math.ceil(2/3 * 2 * r)
         opp_dir_rad = 2 * r - ind_dir_rad
         print()
-        neighbors = []
+
         print("direction", d)
         for step in range(1, ind_dir_rad+1):
-            # neighbors.append(self.current_idx + d * step)
             idx = self.current_idx + d * step
             print("indirection", idx)
             if idx < 0 or idx >= len(self.files) or idx in self._preload_cache or idx in self._preload_inflight:
@@ -1456,20 +1442,13 @@ class HeicViewer(QMainWindow):
             self._request_load(idx, self.files[idx], priority=0)
 
         for step in range(1, opp_dir_rad+1):
-            # neighbors.append(self.current_idx - d * step)
             idx = self.current_idx - d * step
             print("oppdirection", idx)
             if idx < 0 or idx >= len(self.files) or idx in self._preload_cache or idx in self._preload_inflight:
                 continue
             self._request_load(idx, self.files[idx], priority=0)
 
-        # # for idx in neighbors:
-        #     if idx < 0 or idx >= len(self.files):
-        #         continue
-        #     if idx in self._preload_cache or idx in self._preload_inflight:
-        #         continue
-        #
-        #     self._request_load(idx, self.files[idx], priority=0)
+        # print(self._preload_cache)
 
     @Slot(int, object, dict, int)
     def _on_preload_loaded(self, idx, qimg, info, gen):
