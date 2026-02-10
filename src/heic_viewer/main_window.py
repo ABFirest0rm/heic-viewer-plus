@@ -488,7 +488,10 @@ class HeicViewer(QMainWindow):
         self.loading_overlay.setGeometry(rect)
         self.loading_overlay.raise_()
 
-    def _set_loading(self, loading: bool, text="Loading…"):
+    def _set_loading(self, loading, text="Loading…"):
+        if self._is_loading == loading:
+            return
+
         self._is_loading = loading
 
         widgets = (
@@ -766,6 +769,7 @@ class HeicViewer(QMainWindow):
             out_path = out_path.with_suffix(".webp")
 
         progress = QProgressDialog("Converting image...", None, 0, 0, self)
+        progress.setWindowTitle("Converting image")
         progress.setWindowModality(Qt.WindowModal)
         progress.setCancelButton(None)
         progress.show()
@@ -849,6 +853,7 @@ class HeicViewer(QMainWindow):
             out_path = out_path.with_suffix(".webp")
 
         progress = QProgressDialog("Saving image...", None, 0, 0, self)
+        progress.setWindowTitle("Saving image")
         progress.setWindowModality(Qt.WindowModal)
         progress.setCancelButton(None)
         progress.show()
@@ -1071,8 +1076,6 @@ class HeicViewer(QMainWindow):
 
         cached = self._preload_cache.get(self.current_idx)
         if cached is not None:
-            print("CACHE HIT", self.current_idx, path.name)
-
             cached_path, pixmap, info = cached
             if cached_path == path:
                 self.update_image_info(
@@ -1084,11 +1087,7 @@ class HeicViewer(QMainWindow):
                 self._display_pixmap(pixmap)
                 return
 
-            else:
-                print("CACHE MISMATCH", self.current_idx, "cache:", cached_path.name, "want:", path.name)
-
         if self.current_idx in self._preload_inflight:
-            print("WAITING (no sync load)", self.current_idx, path.name)
             self._status_path = path
             self._status_wh = None
             msg = f"{path.name}   |   Loading…"
@@ -1097,8 +1096,6 @@ class HeicViewer(QMainWindow):
             self.statusBar().showMessage("Loading…", 0)
             return
 
-
-        print("CACHE MISS", self.current_idx, path.name, "inflight:", sorted(self._preload_inflight))
         self._status_path = path
         self._status_wh = None
         self.statusBar().showMessage(f"{path.name}   |   Loading…", 0)
@@ -1431,24 +1428,18 @@ class HeicViewer(QMainWindow):
 
         ind_dir_rad = math.ceil(2/3 * 2 * r)
         opp_dir_rad = 2 * r - ind_dir_rad
-        print()
 
-        print("direction", d)
         for step in range(1, ind_dir_rad+1):
             idx = self.current_idx + d * step
-            print("indirection", idx)
             if idx < 0 or idx >= len(self.files) or idx in self._preload_cache or idx in self._preload_inflight:
                 continue
             self._request_load(idx, self.files[idx], priority=0)
 
         for step in range(1, opp_dir_rad+1):
             idx = self.current_idx - d * step
-            print("oppdirection", idx)
             if idx < 0 or idx >= len(self.files) or idx in self._preload_cache or idx in self._preload_inflight:
                 continue
             self._request_load(idx, self.files[idx], priority=0)
-
-        # print(self._preload_cache)
 
     @Slot(int, object, dict, int)
     def _on_preload_loaded(self, idx, qimg, info, gen):
