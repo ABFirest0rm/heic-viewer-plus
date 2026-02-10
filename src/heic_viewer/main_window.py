@@ -1442,19 +1442,34 @@ class HeicViewer(QMainWindow):
         r = self._preload_radius
         d = getattr(self, "_nav_dir", +1)
 
+        ind_dir_rad = math.ceil(2/3 * 2 * r)
+        opp_dir_rad = 2 * r - ind_dir_rad
+        print()
         neighbors = []
-        for step in range(1, r + 1):
-            neighbors.append(self.current_idx + d * step)
-        for step in range(1, r + 1):
-            neighbors.append(self.current_idx - d * step)
-
-        for idx in neighbors:
-            if idx < 0 or idx >= len(self.files):
+        print("direction", d)
+        for step in range(1, ind_dir_rad+1):
+            # neighbors.append(self.current_idx + d * step)
+            idx = self.current_idx + d * step
+            print("indirection", idx)
+            if idx < 0 or idx >= len(self.files) or idx in self._preload_cache or idx in self._preload_inflight:
                 continue
-            if idx in self._preload_cache or idx in self._preload_inflight:
-                continue
-
             self._request_load(idx, self.files[idx], priority=0)
+
+        for step in range(1, opp_dir_rad+1):
+            # neighbors.append(self.current_idx - d * step)
+            idx = self.current_idx - d * step
+            print("oppdirection", idx)
+            if idx < 0 or idx >= len(self.files) or idx in self._preload_cache or idx in self._preload_inflight:
+                continue
+            self._request_load(idx, self.files[idx], priority=0)
+
+        # # for idx in neighbors:
+        #     if idx < 0 or idx >= len(self.files):
+        #         continue
+        #     if idx in self._preload_cache or idx in self._preload_inflight:
+        #         continue
+        #
+        #     self._request_load(idx, self.files[idx], priority=0)
 
     @Slot(int, object, dict, int)
     def _on_preload_loaded(self, idx, qimg, info, gen):
