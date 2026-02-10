@@ -65,3 +65,7 @@ HeicViewerPlus is built with **PySide6 (Qt)** and **Pillow**, with a strong focu
    ```bash
    chmod +x HeicViewerPlus-Linux-x86_64
    ./HeicViewerPlus-Linux-x86_64
+
+## 📄 License
+
+This project is licensed under the MIT License.
