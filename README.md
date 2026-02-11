@@ -40,7 +40,7 @@ HeicViewerPlus is built with **PySide6 (Qt)** and **Pillow**, with a strong focu
 
 - **Multi-threaded Pipeline:** Uses `QThreadPool` to move file I/O and decoding off the GUI thread, keeping the interface responsive even for large HEIC files
 - **Asymmetric Predictive Caching:** Maintains a direction-aware preload window that skews based on navigation intent, prioritizing the images you are most likely to view next instead of loading symmetrically
-- **Memory-Bound Asymmetric Window:** The cache maintains a direction-biased sliding window instead of a fixed radius, preventing memory growth while still prioritizing the most likely next images
+- **Bounded Asymmetric Sliding Cache:** Maintains a direction-biased sliding window with a fixed maximum number of cached images, ensuring predictable memory usage while prioritizing the most likely next images.
 - **Affine View Transforms:** Zoom, rotation, and crop previews rely on Qt’s graphics-view transformations instead of mutating pixel buffers, ensuring zero quality loss during viewing
 
 ---
